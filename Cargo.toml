@@ -1,0 +1,24 @@
+[package]
+name    = "jiggly"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+embassy-executor = { version = "0.10.0", features = ["platform-cortex-m", "executor-thread"] }
+embassy-time     = { version = "0.5.1" }
+embassy-rp       = { version = "0.10.0", features = ["rp2040", "time-driver", "critical-section-impl", "unstable-pac"] }
+embassy-usb      = "0.6.0"
+usbd-hid         = "0.10.0"
+
+cortex-m        = { version = "0.7.6", features = ["inline-asm"] }
+cortex-m-rt     = "0.7.5"
+panic-reset     = "0.1"
+static_cell     = "2.1"
+portable-atomic = { version = "1.13", features = ["critical-section"] }
+
+[profile.release]
+lto             = true
+opt-level       = "s"
+codegen-units   = 1
+debug           = 2
+overflow-checks = false

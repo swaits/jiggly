@@ -1,0 +1,16 @@
+[tools]
+rust = { version = "1.95.0", profile = "minimal", components = ["cargo", "clippy", "llvm-tools", "rust-src", "rust-std", "rustc", "rustfmt"], targets = ["thumbv6m-none-eabi"] }
+just = "latest"
+
+"cargo:cargo-binutils" = "latest"
+"cargo:uf2conv"        = "latest"
+"cargo:cargo-watch"    = "latest"
+"cargo:cargo-bloat"    = "latest"
+"cargo:cargo-expand"   = "latest"
+
+[env]
+CARGO_TARGET_DIR = "target"
+DEFMT_LOG        = "off"
+
+[settings]
+experimental = true
