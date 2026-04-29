@@ -3,18 +3,34 @@ name    = "jiggly"
 version = "0.1.0"
 edition = "2024"
 
+[features]
+default = ["embassy"]
+# `hsmc` emits `#[cfg(feature = "embassy")]` from inside `statechart!` and
+# the cfg is evaluated in this crate's context, so we mirror the flag here
+# and forward it to `hsmc/embassy`.
+embassy = ["hsmc/embassy"]
+
 [dependencies]
 embassy-executor = { version = "0.10.0", features = ["platform-cortex-m", "executor-thread"] }
 embassy-time     = { version = "0.5.1" }
 embassy-rp       = { version = "0.10.0", features = ["rp2040", "time-driver", "critical-section-impl", "unstable-pac"] }
+embassy-sync     = "0.8"
+embassy-futures  = "0.1"
 embassy-usb      = "0.6.0"
+hsmc             = { version = "0.5.1", default-features = false }
 usbd-hid         = "0.10.0"
+smart-leds       = "0.4"
+libm             = "0.2"
 
 cortex-m        = { version = "0.7.6", features = ["inline-asm"] }
 cortex-m-rt     = "0.7.5"
 panic-reset     = "0.1"
 static_cell     = "2.1"
+# Cortex-M0+ has no hardware CAS; static_cell + heapless need this shim.
 portable-atomic = { version = "1.13", features = ["critical-section"] }
+
+[lints.rust]
+unexpected_cfgs = { level = "allow", check-cfg = ['cfg(feature, values("tokio", "embassy"))'] }
 
 [profile.release]
 lto             = true

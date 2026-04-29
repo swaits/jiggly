@@ -717,6 +717,30 @@ dependencies = [
 ]
 
 [[package]]
+name = "hsmc"
+version = "0.5.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "497ed9593e4baf6ef120b24aff80cb898f6832d32cdf01be9d90be0c06624e77"
+dependencies = [
+ "embassy-futures",
+ "embassy-sync",
+ "embassy-time",
+ "heapless 0.8.0",
+ "hsmc-macros",
+]
+
+[[package]]
+name = "hsmc-macros"
+version = "0.5.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "49d0b1413ed69ba168f9d0edbf4a8ea21569eaf352edf4e11335ae3d765ba004"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn",
+]
+
+[[package]]
 name = "ident_case"
 version = "1.0.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -748,11 +772,16 @@ dependencies = [
  "cortex-m",
  "cortex-m-rt",
  "embassy-executor",
+ "embassy-futures",
  "embassy-rp",
+ "embassy-sync",
  "embassy-time",
  "embassy-usb",
+ "hsmc",
+ "libm",
  "panic-reset",
  "portable-atomic",
+ "smart-leds",
  "static_cell",
  "usbd-hid",
 ]
@@ -809,6 +838,12 @@ name = "libc"
 version = "0.2.185"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "52ff2c0fe9bc6cb6b14a0592c2ff4fa9ceb83eea9db979b0487cd054946a2b8f"
+
+[[package]]
+name = "libm"
+version = "0.2.16"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "b6d2cec3eae94f9f509c767b45932f1ada8350c4bdb85af2fcab4a3c14807981"
 
 [[package]]
 name = "litrs"
