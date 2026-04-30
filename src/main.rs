@@ -22,7 +22,7 @@ use embassy_usb::{
     class::hid::{Config as HidConfig, HidBootProtocol, HidSubclass, HidWriter, State},
 };
 use hsmc::{Duration, statechart};
-use libm::{cosf, roundf, sinf};
+use libm::{cosf, powf, roundf, sinf};
 use panic_reset as _;
 use smart_leds::RGB8;
 use static_cell::StaticCell;
@@ -45,7 +45,7 @@ type Writer = HidWriter<'static, UsbDriver, 5>;
 const RUN_DURATION: Duration = Duration::from_hours(3).saturating_add(Duration::from_mins(50));
 const SHUTDOWN_LEAD: Duration = Duration::from_secs(30);
 const RUN_BEFORE_SHUTDOWN: Duration = RUN_DURATION.saturating_sub(SHUTDOWN_LEAD);
-const SHUTDOWN_ANIM_BUDGET: Duration = Duration::from_secs(2);
+const SHUTDOWN_ANIM_BUDGET: Duration = Duration::from_secs(5);
 const QUIET_AFTER_ANIM: Duration = SHUTDOWN_LEAD.saturating_sub(SHUTDOWN_ANIM_BUDGET);
 const JIGGLE_PERIOD: Duration = Duration::from_secs(270);
 const FLASH_DURATION: Duration = Duration::from_millis(100);
@@ -93,10 +93,33 @@ const RUN_RADIUS: f32 = 40.0;
 const RUN_FRAMES_PER_CIRCLE: u32 = 25;
 const RUN_CIRCLES: u32 = 3;
 
-const SHUTDOWN_RADIUS_START: f32 = 50.0;
-const SHUTDOWN_RADIUS_END: f32 = 5.0;
-const SHUTDOWN_TURNS: u32 = 3;
-const SHUTDOWN_FRAMES: u32 = 120;
+// Shared "spin-down" spiral. Both radius and angle are driven by an eased phase
+// u(t) = t^EASE_POW with EASE_POW > 1 — slow at the start, ~EASE_POW× the
+// average rate at the finish. Because radius and angle share u, the inward
+// spiral and the rotation accelerate together: a coin/Euler-disk feel.
+const EASE_POW: f32 = 2.5;
+const SPIRAL_RADIUS_END: f32 = 2.0;
+
+// Final shutdown — the dramatic full version, 30 s before USB goes silent.
+const SHUTDOWN_RADIUS_START: f32 = 80.0;
+const SHUTDOWN_TURNS: f32 = 5.0;
+const SHUTDOWN_FRAMES: u32 = 625; // 5.0 s @ 8 ms/frame
+
+// 5-min warning — medium escalation.
+const WARN5_RADIUS_START: f32 = 50.0;
+const WARN5_TURNS: f32 = 3.0;
+const WARN5_FRAMES: u32 = 312; // ~2.5 s
+
+// 10-min warning — small foreshadow.
+const WARN10_RADIUS_START: f32 = 30.0;
+const WARN10_TURNS: f32 = 2.0;
+const WARN10_FRAMES: u32 = 187; // ~1.5 s
+
+// Offsets from Active-entry. The hsmc parent timer rule: timers in a parent
+// state start on parent entry and survive sibling-substate transitions, so
+// these three `after`s race concurrently against the same epoch.
+const WARN_10_AT: Duration = RUN_BEFORE_SHUTDOWN.saturating_sub(Duration::from_mins(10));
+const WARN_5_AT: Duration = RUN_BEFORE_SHUTDOWN.saturating_sub(Duration::from_mins(5));
 
 // ── Watchdog (independent task) ────────────────────────────────────
 const WATCHDOG_TIMEOUT: EDuration = EDuration::from_secs(8);
@@ -126,6 +149,7 @@ pub enum Ev {
     WakeDone,
     RunDone,
     Jiggled,
+    WarnDone,
     ShutdownAnimDone,
 }
 
@@ -159,6 +183,8 @@ Jiggly {
     state Active {
         entry: capture_active_start;
         on(every JIGGLE_PERIOD) => jiggle_pair;
+        on(after WARN_10_AT) => Warning10;
+        on(after WARN_5_AT) => Warning5;
         on(after RUN_BEFORE_SHUTDOWN) => Ending;
         default(Breathing);
 
@@ -170,6 +196,16 @@ Jiggly {
         state Flashing {
             entry: paint_white;
             on(after FLASH_DURATION) => Breathing;
+        }
+
+        state Warning10 {
+            during: animate_warning_10(writer);
+            on(WarnDone) => Breathing;
+        }
+
+        state Warning5 {
+            during: animate_warning_5(writer);
+            on(WarnDone) => Breathing;
         }
     }
 
@@ -290,17 +326,24 @@ async fn animate_running(writer: &mut Writer) -> Ev {
     Ev::RunDone
 }
 
-async fn animate_shutdown(writer: &mut Writer) -> Ev {
+async fn animate_spiral(
+    writer: &mut Writer,
+    radius_start: f32,
+    radius_end: f32,
+    turns: f32,
+    frames: u32,
+) {
     let mut prev_x: f32 = 0.0;
     let mut prev_y: f32 = 0.0;
     let mut acc_x: f32 = 0.0;
     let mut acc_y: f32 = 0.0;
-    for f in 0..SHUTDOWN_FRAMES {
-        let t = (f as f32) / (SHUTDOWN_FRAMES as f32);
-        let angle = t * 2.0 * PI * (SHUTDOWN_TURNS as f32);
-        let radius = SHUTDOWN_RADIUS_START + (SHUTDOWN_RADIUS_END - SHUTDOWN_RADIUS_START) * t;
+    for f in 0..frames {
+        let t = (f as f32) / (frames as f32);
+        let u = powf(t, EASE_POW);
+        let angle = u * 2.0 * PI * turns;
+        let radius = radius_start + (radius_end - radius_start) * u;
         // Subtract starting offset so the spiral begins at the cursor's entry point.
-        let next_x = radius * cosf(angle) - SHUTDOWN_RADIUS_START;
+        let next_x = radius * cosf(angle) - radius_start;
         let next_y = radius * sinf(angle);
         let (dx, dy, used_x, used_y) = step_delta(prev_x, prev_y, next_x, next_y, acc_x, acc_y);
         acc_x = used_x;
@@ -310,7 +353,42 @@ async fn animate_shutdown(writer: &mut Writer) -> Ev {
         prev_y = next_y;
         Timer::after(ANIM_FRAME).await;
     }
+}
+
+async fn animate_shutdown(writer: &mut Writer) -> Ev {
+    animate_spiral(
+        writer,
+        SHUTDOWN_RADIUS_START,
+        SPIRAL_RADIUS_END,
+        SHUTDOWN_TURNS,
+        SHUTDOWN_FRAMES,
+    )
+    .await;
     Ev::ShutdownAnimDone
+}
+
+async fn animate_warning_5(writer: &mut Writer) -> Ev {
+    animate_spiral(
+        writer,
+        WARN5_RADIUS_START,
+        SPIRAL_RADIUS_END,
+        WARN5_TURNS,
+        WARN5_FRAMES,
+    )
+    .await;
+    Ev::WarnDone
+}
+
+async fn animate_warning_10(writer: &mut Writer) -> Ev {
+    animate_spiral(
+        writer,
+        WARN10_RADIUS_START,
+        SPIRAL_RADIUS_END,
+        WARN10_TURNS,
+        WARN10_FRAMES,
+    )
+    .await;
+    Ev::WarnDone
 }
 
 async fn breathe_color(neo: &mut Neo, active_start: &mut Option<Instant>) -> Ev {

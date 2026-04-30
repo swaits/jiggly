@@ -20,9 +20,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     display."
   - **Running** (`ShowingRunning`): 3 quick clockwise circles
     (radius 40 px, ~600 ms) — universal "spinner / in progress" cue.
-  - **Pre-shutdown** (`Ending → ShutdownAnim`): inward spiral 50 → 5 px
-    over 3 turns (~2 s), 30 s before lifetime end — cursor visibly winds
-    down.
+  - **Pre-shutdown** (`Ending → ShutdownAnim`): eased inward spiral
+    80 → 2 px over 5 turns (~5 s), starting 30 s before lifetime end. A
+    shared phase `u(t) = t^2.5` drives both radius and angle, so the
+    rotation accelerates as the radius collapses — the visual signature
+    of a coin/Euler-disk spinning down.
+  - **Warnings** (`Active → Warning10 / Warning5`): mini versions of
+    the same spiral fire 10 min and 5 min before shutdown — 30 → 2 px
+    over 2 turns (~1.5 s) and 50 → 2 px over 3 turns (~2.5 s) — so the
+    user gets escalating kinetic foreshadowing of the death gesture
+    that's coming.
 - 2 s `Settling` state between wake-up and running animations so the
   display has time to come out of sleep before the spinner draws.
 - All animations carry sub-pixel residue forward across `i8` HID delta
