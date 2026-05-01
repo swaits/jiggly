@@ -1,7 +1,15 @@
 [package]
-name    = "jiggly"
-version = "0.1.0"
-edition = "2024"
+name        = "jiggly"
+version     = "0.2.0"
+edition     = "2024"
+authors     = ["Stephen Waits <steve@waits.net>"]
+description = "USB mouse jiggler firmware for the Seeed Studio Xiao RP2040 — keeps your screen awake during the workday, then politely shuts up so you can go home."
+license     = "MIT"
+repository  = "https://github.com/swaits/jiggly"
+readme      = "README.md"
+keywords    = ["embedded", "rp2040", "usb-hid", "embassy", "no-std"]
+categories  = ["embedded", "no-std"]
+publish     = false  # firmware binary; not a crates.io library
 
 [features]
 default = ["embassy"]
@@ -33,8 +41,11 @@ portable-atomic = { version = "1.13", features = ["critical-section"] }
 unexpected_cfgs = { level = "allow", check-cfg = ['cfg(feature, values("tokio", "embassy"))'] }
 
 [profile.release]
-lto             = true
-opt-level       = "s"
-codegen-units   = 1
-debug           = 2
+lto             = "fat"      # cross-crate inlining and dead-code elimination
+opt-level       = "z"        # optimise for size over speed (vs "s")
+codegen-units   = 1          # single unit so LTO sees everything
+debug           = 2          # symbols stay in the ELF for `just bloat` /
+#                              `just size`; `cargo objcopy -O binary` strips
+#                              them when producing the flashable .bin / .uf2
 overflow-checks = false
+panic           = "abort"    # no unwinding tables; panic-reset just resets

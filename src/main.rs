@@ -5,11 +5,12 @@ use core::f32::consts::PI;
 
 use embassy_executor::Spawner;
 use embassy_rp::{
-    bind_interrupts,
+    Peri, bind_interrupts,
     clocks::RoscRng,
     dma,
+    flash::Flash,
     gpio::{Level, Output},
-    peripherals::{DMA_CH0, PIO0, USB},
+    peripherals::{DMA_CH0, FLASH, PIO0, USB},
     pio::{InterruptHandler as PioInterruptHandler, Pio},
     pio_programs::ws2812::{Grb, PioWs2812, PioWs2812Program},
     usb::{Driver, InterruptHandler as UsbInterruptHandler},
@@ -40,10 +41,13 @@ type MouseHid = HidWriter<'static, UsbDriver, 5>;
 type KbdHid = HidWriter<'static, UsbDriver, 8>;
 
 // ── Lifecycle timing (statechart Durations) ────────────────────────
-// 3h50m: math-optimal under the user's schedule for "screen sleeps during
-// lunch on most days". Balances early-start re-tap risk against late-start
-// alive-through-lunch risk. See /tmp/jiggly_runtime_v3.py.
-const RUN_DURATION: Duration = Duration::from_hours(3).saturating_add(Duration::from_mins(50));
+// 4h00m: optimum from the 4-D Monte Carlo (RUN_DURATION × YELLOW_AT ×
+// RED_AT × FAST_RED_AT) over a typical office workday distribution
+// with a per-minute press-on-warning user model. Lands the screen-sleep
+// in the 12:15–12:45 sweet spot on ~52 % of days and somewhere in
+// lunch on ~74 %. See the README's "Why four hours…" section and
+// `scripts/tune_runtime.py` for the simulation.
+const RUN_DURATION: Duration = Duration::from_hours(4);
 const SHUTDOWN_LEAD: Duration = Duration::from_secs(30);
 const RUN_BEFORE_SHUTDOWN: Duration = RUN_DURATION.saturating_sub(SHUTDOWN_LEAD);
 const SHUTDOWN_ANIM_BUDGET: Duration = Duration::from_secs(5);
@@ -52,9 +56,12 @@ const JIGGLE_PERIOD: Duration = Duration::from_secs(270);
 const FLASH_DURATION: Duration = Duration::from_millis(100);
 
 // Phase boundaries — compared against time *remaining* in Active.
-const YELLOW_AT: EDuration = EDuration::from_secs(60 * 60);
-const RED_AT: EDuration = EDuration::from_secs(30 * 60);
-const FAST_RED_AT: EDuration = EDuration::from_secs(10 * 60);
+// Joint optimum from `scripts/tune_runtime.py`. Yellow and red are
+// kept deliberately short (5 min each); the long phase is fast-red.
+// See the README's "Why four hours…" section for the rationale.
+const YELLOW_AT: EDuration = EDuration::from_secs(30 * 60);
+const RED_AT: EDuration = EDuration::from_secs(25 * 60);
+const FAST_RED_AT: EDuration = EDuration::from_secs(20 * 60);
 
 // LED breathing math
 const LED_TICK: EDuration = EDuration::from_millis(20);
@@ -90,17 +97,36 @@ const SETTLING_DELAY: Duration = Duration::from_secs(2);
 
 // ── Keyboard wake (host-wake first pass) ───────────────────────────
 // macOS often won't wake from raw HID mouse motion alone, but reliably wakes
-// from a keyboard event. Tap Left Shift four times before the mouse shake;
-// Shift is a modifier, so it produces no visible character even if focus is
-// on a text field at the moment of wake.
+// from any keyboard event. We tap **F13** four times before the mouse shake.
+// F13–F24 are intentionally unmapped on every mainstream OS, so even in the
+// nightmare scenario where the deadline preempts the loop *between* a key-
+// down and key-up report and the host ends up holding F13 forever, nothing
+// visible happens — unlike with Shift, which would silently capitalise every
+// keystroke from the user's real keyboard until they unplug the device.
+// Earlier versions used Left Shift; that turned out to be exactly that
+// nightmare scenario in practice.
 const KBD_WAKE_TAPS: u32 = 4;
 const KBD_TAP_HOLD: EDuration = EDuration::from_millis(30);
 const KBD_TAP_GAP: EDuration = EDuration::from_millis(50);
-// Total parent dwell: 4 × (30 + 50) = 320 ms of taps + ~180 ms slack so the
-// host has a chance to start coming up before the mouse shake begins.
-const KBD_WAKE_DURATION: Duration = Duration::from_millis(500);
-// USB HID Boot Keyboard modifier byte: bit 1 = Left Shift.
-const KBD_MOD_LEFT_SHIFT: u8 = 0x02;
+// Hard internal deadline on the keyboard-wake entry action. The taps total
+// ~320 ms so they finish well before this; the deadline only kicks in if a
+// USB write blocks (e.g. the host hasn't bound the keyboard endpoint yet).
+const KBD_WAKE_DEADLINE: EDuration = EDuration::from_millis(500);
+// Statechart timer for the WakingWithKeyboard state — chosen above the
+// internal deadline so the chart timer is what drives the transition out.
+const KBD_PHASE_DURATION: Duration = Duration::from_millis(550);
+// HID Keyboard usage page keycode for F13.
+const KBD_KEY_F13: u8 = 0x68;
+// Final-cleanup deadline — the all-keys-released report we send after the
+// main work loop is bounded by this so a misbehaving endpoint can't pin
+// the chart. Best-effort; if it doesn't land we tried.
+const KBD_RELEASE_DEADLINE: EDuration = EDuration::from_millis(100);
+
+// ── Mouse wake (host-wake second pass) ─────────────────────────────
+// Internal deadline on the mouse-shake entry action — the shake itself takes
+// ~640 ms; the cap exists so a misbehaving USB endpoint can't pin the chart.
+const MOUSE_WAKE_DEADLINE: EDuration = EDuration::from_millis(1000);
+const MOUSE_PHASE_DURATION: Duration = Duration::from_millis(1050);
 
 // Three quick clockwise circles read more clearly as "spinner / running"
 // than one slow lap. 25 frames per circle × 3 × 8 ms = 600 ms total.
@@ -162,7 +188,6 @@ pub struct Ctx {
 #[derive(Debug, Clone)]
 pub enum Ev {
     BootDone,
-    WakeDone,
     SpinDone,
     Jiggled,
     WarnDone,
@@ -182,19 +207,20 @@ Jiggly {
 
     // Wake the host using whichever input the host actually responds to.
     // Keyboard first (more reliable on macOS), then a mouse shake as
-    // belt-and-suspenders. The parent state catches WakeDone (emitted by the
-    // mouse path) and exits to Settling.
+    // belt-and-suspenders. Each substate runs a oneshot entry action with
+    // its own internal deadline; the chart timer is what advances the
+    // chart. No durings, no events — purely entry + timer.
     state WakingHost {
         default(WakingWithKeyboard);
-        on(WakeDone) => Settling;
 
         state WakingWithKeyboard {
-            during: wake_with_keyboard(kbd);
-            on(after KBD_WAKE_DURATION) => WakingWithMouse;
+            entry: keyboard_wake;
+            on(after KBD_PHASE_DURATION) => WakingWithMouse;
         }
 
         state WakingWithMouse {
-            during: wake_with_mouse(mouse);
+            entry: mouse_wake;
+            on(after MOUSE_PHASE_DURATION) => Settling;
         }
     }
 
@@ -264,6 +290,33 @@ impl JigglyActions for JigglyActionContext<'_> {
         self.active_start = Some(Instant::now());
     }
 
+    async fn keyboard_wake(&mut self) {
+        let _ = embassy_futures::select::select(
+            wake_with_keyboard(&mut self.kbd),
+            Timer::after(KBD_WAKE_DEADLINE),
+        )
+        .await;
+        // Belt-and-suspenders: always send an all-keys-released report,
+        // even if the deadline preempted the loop *between* a key-down
+        // and its key-up. Without this, a stuck modifier (Shift!) or key
+        // on the host side could persist until the user unplugs the
+        // device. Bounded by KBD_RELEASE_DEADLINE so a misbehaving
+        // endpoint can't pin the chart.
+        let _ = embassy_futures::select::select(
+            send_kbd(&mut self.kbd, 0, [0; 6]),
+            Timer::after(KBD_RELEASE_DEADLINE),
+        )
+        .await;
+    }
+
+    async fn mouse_wake(&mut self) {
+        let _ = embassy_futures::select::select(
+            wake_with_mouse(&mut self.mouse),
+            Timer::after(MOUSE_WAKE_DEADLINE),
+        )
+        .await;
+    }
+
     async fn jiggle_pair(&mut self) {
         let (dx, dy): (i8, i8) = if (RoscRng::next_u8() & 1) == 0 {
             (1, 0)
@@ -310,25 +363,23 @@ async fn boot_sweep(neo: &mut Neo, neo_pwr: &mut Output<'static>) -> Ev {
     Ev::BootDone
 }
 
-// Tap Left Shift 4 times — macOS reliably wakes from a keyboard event but is
-// inconsistent about waking from raw mouse motion. The during loop ends after
-// the taps and idles in a long sleep; the parent state's KBD_WAKE_DURATION
-// timeout drives the transition out, not a completion event from this fn.
-async fn wake_with_keyboard(kbd: &mut KbdHid) -> Ev {
+// Tap F13 four times. macOS reliably wakes from any keyboard event but is
+// inconsistent about waking from raw mouse motion. Plain oneshot helper —
+// the action method that calls this races it against KBD_WAKE_DEADLINE
+// AND unconditionally sends an all-keys-released cleanup report after,
+// to make sure we never leave a key held on the host.
+async fn wake_with_keyboard(kbd: &mut KbdHid) {
     for _ in 0..KBD_WAKE_TAPS {
-        send_kbd(kbd, KBD_MOD_LEFT_SHIFT, [0; 6]).await;
+        send_kbd(kbd, 0, [KBD_KEY_F13, 0, 0, 0, 0, 0]).await;
         Timer::after(KBD_TAP_HOLD).await;
         send_kbd(kbd, 0, [0; 6]).await;
         Timer::after(KBD_TAP_GAP).await;
     }
-    // Idle until the parent timeout fires. The hsmc runtime cancels this
-    // future on transition, so the long sleep just parks us.
-    loop {
-        Timer::after(EDuration::from_secs(60)).await;
-    }
 }
 
-async fn wake_with_mouse(mouse: &mut MouseHid) -> Ev {
+// Frantic horizontal mouse shake. Plain oneshot helper — the action method
+// that calls this races it against MOUSE_WAKE_DEADLINE.
+async fn wake_with_mouse(mouse: &mut MouseHid) {
     let period_frames = (WAKE_FRAMES_PER_HALF * 2) as f32;
     let total_frames = WAKE_OSCILLATIONS * WAKE_FRAMES_PER_HALF * 2;
     let mut prev_x: f32 = 0.0;
@@ -348,7 +399,6 @@ async fn wake_with_mouse(mouse: &mut MouseHid) -> Ev {
         prev_y = next_y;
         Timer::after(ANIM_FRAME).await;
     }
-    Ev::WakeDone
 }
 
 async fn animate_spinner(mouse: &mut MouseHid) -> Ev {
@@ -553,6 +603,31 @@ async fn paint(neo: &mut Neo, r: u8, g: u8, b: u8) {
     neo.write(&[RGB8 { r, g, b }]).await;
 }
 
+// ── USB serial number from RP2040 unique chip ID ───────────────────
+// Reads the 64-bit unique ID baked into the on-board SPI flash, formats
+// it as 16 ASCII hex chars in a static buffer, and returns a `'static`
+// string suitable for `embassy_usb::Config::serial_number`. This makes
+// the device's USB identity stable per-board across replugs (so hosts
+// stop treating each plug as a new device) while still being unique
+// between different boards.
+const FLASH_SIZE: usize = 2 * 1024 * 1024; // Xiao RP2040 has 2 MB.
+
+fn make_serial(flash_periph: Peri<'static, FLASH>) -> &'static str {
+    static SERIAL: StaticCell<[u8; 16]> = StaticCell::new();
+    const HEX: &[u8; 16] = b"0123456789ABCDEF";
+
+    let mut flash = Flash::<_, _, FLASH_SIZE>::new_blocking(flash_periph);
+    let mut id = [0u8; 8];
+    let _ = flash.blocking_unique_id(&mut id);
+
+    let buf = SERIAL.init([0; 16]);
+    for (i, &b) in id.iter().enumerate() {
+        buf[i * 2] = HEX[(b >> 4) as usize];
+        buf[i * 2 + 1] = HEX[(b & 0x0f) as usize];
+    }
+    core::str::from_utf8(buf).unwrap()
+}
+
 // ── Tasks ──────────────────────────────────────────────────────────
 
 #[embassy_executor::task]
@@ -594,12 +669,18 @@ async fn main(spawner: Spawner) {
 
     let driver = Driver::new(p.USB, Irqs);
 
-    // Spoof a Logitech Unifying Receiver — a real-world composite device that
-    // exposes both mouse and keyboard HID interfaces under one VID/PID, which
-    // matches what this firmware now does.
-    let mut config = UsbConfig::new(0x046d, 0xc52b);
-    config.manufacturer = Some("Logitech");
-    config.product = Some("USB Receiver");
+    // pid.codes community VID with a self-allocated PID — using a real
+    // Logitech Unifying Receiver VID/PID was a mistake: Linux has a kernel
+    // driver (`hid-logitech-dj`) that special-cases that PID and tries to
+    // talk HID++ to enumerate paired wireless devices. We don't speak
+    // HID++, so the driver waits through ~10–20 s of timeouts before
+    // unbinding and letting `hid-generic` actually start polling our
+    // endpoints. Generic VID/PID routes straight to `hid-generic`.
+    let mut config = UsbConfig::new(0x1209, 0xb0b0);
+    config.manufacturer = Some("swaits.com");
+    config.product = Some("jiggly");
+    config.serial_number = Some(make_serial(p.FLASH));
+    config.device_release = 0x0200; // matches firmware version 0.2.0
     config.max_power = 100;
     config.max_packet_size_0 = 64;
 

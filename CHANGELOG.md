@@ -7,18 +7,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.0] - 2026-05-01
+
 ### Added
 
 - **Composite USB device — mouse + keyboard HID** under one VID/PID. A new
   `WakingHost` parent state wraps two substates: `WakingWithKeyboard`
-  (`default`) taps Left Shift 4× then idles, and parent's
-  `KBD_WAKE_DURATION` timeout drives the transition to `WakingWithMouse`
-  which runs the existing shake animation. Reason: macOS does not reliably
-  wake from raw HID mouse motion alone; a keyboard event does. Shift is a
-  modifier with no character side effect, so it's safe even with focus on a
-  text field at the moment of wake. Adds a second `HidWriter` against the
-  same `embassy_usb::Builder` (no hub simulation; standard USB composite),
-  plus `KbdHid`/`KBD_HID_STATE` machinery and a `send_kbd` helper.
+  taps **F13** 4× then idles, and a chart timer transitions to
+  `WakingWithMouse` which runs the existing shake animation. Reason:
+  macOS does not reliably wake from raw HID mouse motion alone; a
+  keyboard event does. F13 was picked over the more intuitive `Shift`
+  because mainstream OSes don't map F13 by default — if a key ever gets
+  stuck on the host (e.g. the wake deadline preempts the loop between a
+  key-down and key-up report), nothing visible happens. Earlier versions
+  used Left Shift and exhibited exactly that nightmare scenario in
+  practice (host typing was capitalised until the device was unplugged).
+  Belt-and-suspenders: `keyboard_wake` always sends an all-keys-released
+  report after its work loop, regardless of which side of the deadline
+  won. Adds a second `HidWriter` against the same `embassy_usb::Builder`
+  (no hub simulation; standard USB composite), plus `KbdHid` /
+  `KBD_HID_STATE` machinery and a `send_kbd` helper.
 - `hsmc` 0.5.1 statechart drives the entire device lifecycle. The control
   flow (boot → host wake (kbd → mouse) → settle → spinner → active
   jiggle/flash → end-of-day spiral → power-down) is expressed declaratively
@@ -48,10 +56,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
-- **USB descriptor: Logitech G502 (`046d:c07d`, mouse-only) → Logitech
-  Unifying Receiver (`046d:c52b`, real composite mouse+keyboard).** Product
-  string `"G502 Mouse"` → `"USB Receiver"`. Bumping the PID also invalidates
-  the host's cached HID descriptor on first plug after reflash.
+- **USB descriptor: Logitech G502 (`046d:c07d`, mouse-only) → pid.codes
+  hobby slot (`1209:b0b0`).** Product string `"G502 Mouse"` →
+  `"jiggly"`, manufacturer `"Logitech"` → `"swaits.com"`. Briefly
+  spoofed the Logitech Unifying Receiver (`046d:c52b`) on the way from
+  G502 → final, but Linux's `hid-logitech-dj` kernel driver matches that
+  PID and runs ~10–20 s of HID++ control-transfer probes the firmware
+  doesn't answer, blocking actual endpoint polling for that long on
+  every plug. macOS doesn't have the driver and was unaffected.
+  Switching to a pid.codes VID lets `hid-generic` bind immediately on
+  Linux.
+- **`config.device_release = 0x0200`** (was unset / default `0x0010`).
+  Matches firmware version `0.2.0`.
+- **`config.serial_number`** now derived from the RP2040's 64-bit unique
+  chip ID, rendered as a 16-hex-char `&'static str` in a `StaticCell`.
+  Hosts now treat each replug as the same device, and two boards have
+  distinct identities.
 - **Statechart names cleaned up for symmetry**:
   - `BootSweep` → `Booting`; `Ev::SweepDone` → `Ev::BootDone`;
     `led_rgb_sweep` → `boot_sweep`.
@@ -67,11 +87,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     `FINAL_SPIRAL_*`.
   - `Ctx.writer: Writer` → `Ctx.mouse: MouseHid` (parallel to new
     `Ctx.kbd: KbdHid`); `send` → `send_mouse`.
-- **`RUN_DURATION` from 8 hours to 3 h 50 m**. Math-optimal under the
-  user's workday distribution (start `triangular(8.0, mode=8.5, 9.5)`,
-  lunch 12:00–13:00, end `triangular(16.0, mode=17.5, 19.0)`) for "screen
-  goes to sleep during the lunch hour on most days." See
-  `/tmp/jiggly_runtime_v3.py` for the simulation.
+- **`RUN_DURATION` 8 h → 4 h 00 m** and **LED phase boundaries
+  60 / 30 / 10 → 30 / 25 / 20** (`YELLOW_AT` / `RED_AT` / `FAST_RED_AT`,
+  in minutes-remaining). Joint optimum from a 4-D Monte Carlo over a
+  typical office workday distribution (start `triangular(8.0,
+  mode=8.5, 9.5)`, lunch 12:00–13:00, end `triangular(16.0, mode=17.5,
+  19.0)`) with a per-minute press-on-warning user model (yellow
+  ~1.5 %/min, red ~4 %/min, fast-red ~6 %/min, plus small bumps at the
+  10'/5' spiral animations). The hand-picked `60/30/10` was almost
+  exactly 50ᵗʰ-percentile; pushing the warning thresholds much closer
+  to death lifts `P(any lunch sleep)` from 53 % → 74 % and `P(sweet
+  12:15–12:45 spot)` from 34 % → 52 %. The mechanism is non-obvious —
+  long visible warnings cause more accidental morning RESET-presses
+  that extend the cycle into the afternoon, which is the opposite of
+  what the user wants. See `scripts/tune_runtime.py` for the
+  simulation.
 - HID `poll_ms` 60 → 8 (125 Hz). At the previous 60 ms poll the host
   was discarding ~7 of every 8 animation frames the firmware emitted.
 - Boot LED `R→G→B` step 180 ms → 60 ms; 1.5 s pre-animation USB-settle
@@ -115,5 +145,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `bootstrap`. All recipes execute inside `mise exec -- sh -eu -c` so the
   pinned toolchain is used regardless of shell activation state.
 
-[Unreleased]: https://github.com/swaits/jiggly/compare/v0.1.0...HEAD
+[Unreleased]: https://github.com/swaits/jiggly/compare/v0.2.0...HEAD
+[0.2.0]: https://github.com/swaits/jiggly/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/swaits/jiggly/releases/tag/v0.1.0
