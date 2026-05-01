@@ -26,7 +26,7 @@ use libm::{cosf, powf, roundf, sinf};
 use panic_reset as _;
 use smart_leds::RGB8;
 use static_cell::StaticCell;
-use usbd_hid::descriptor::{MouseReport, SerializedDescriptor};
+use usbd_hid::descriptor::{KeyboardReport, MouseReport, SerializedDescriptor};
 
 bind_interrupts!(struct Irqs {
     USBCTRL_IRQ => UsbInterruptHandler<USB>;
@@ -36,7 +36,8 @@ bind_interrupts!(struct Irqs {
 
 type UsbDriver = Driver<'static, USB>;
 type Neo = PioWs2812<'static, PIO0, 0, 1, Grb>;
-type Writer = HidWriter<'static, UsbDriver, 5>;
+type MouseHid = HidWriter<'static, UsbDriver, 5>;
+type KbdHid = HidWriter<'static, UsbDriver, 8>;
 
 // ── Lifecycle timing (statechart Durations) ────────────────────────
 // 3h50m: math-optimal under the user's schedule for "screen sleeps during
@@ -83,9 +84,23 @@ const WAKE_AMPLITUDE: f32 = 60.0;
 const WAKE_JITTER: f32 = 1.0;
 
 // 2 s pause after the shake so the display has time to actually wake before
-// we draw the "running" circles. The user wants this delay to live *here*,
-// not before the shake.
+// we draw the spinner. The user wants this delay to live *here*, not before
+// the shake.
 const SETTLING_DELAY: Duration = Duration::from_secs(2);
+
+// ── Keyboard wake (host-wake first pass) ───────────────────────────
+// macOS often won't wake from raw HID mouse motion alone, but reliably wakes
+// from a keyboard event. Tap Left Shift four times before the mouse shake;
+// Shift is a modifier, so it produces no visible character even if focus is
+// on a text field at the moment of wake.
+const KBD_WAKE_TAPS: u32 = 4;
+const KBD_TAP_HOLD: EDuration = EDuration::from_millis(30);
+const KBD_TAP_GAP: EDuration = EDuration::from_millis(50);
+// Total parent dwell: 4 × (30 + 50) = 320 ms of taps + ~180 ms slack so the
+// host has a chance to start coming up before the mouse shake begins.
+const KBD_WAKE_DURATION: Duration = Duration::from_millis(500);
+// USB HID Boot Keyboard modifier byte: bit 1 = Left Shift.
+const KBD_MOD_LEFT_SHIFT: u8 = 0x02;
 
 // Three quick clockwise circles read more clearly as "spinner / running"
 // than one slow lap. 25 frames per circle × 3 × 8 ms = 600 ms total.
@@ -100,10 +115,10 @@ const RUN_CIRCLES: u32 = 3;
 const EASE_POW: f32 = 2.5;
 const SPIRAL_RADIUS_END: f32 = 2.0;
 
-// Final shutdown — the dramatic full version, 30 s before USB goes silent.
-const SHUTDOWN_RADIUS_START: f32 = 80.0;
-const SHUTDOWN_TURNS: f32 = 5.0;
-const SHUTDOWN_FRAMES: u32 = 625; // 5.0 s @ 8 ms/frame
+// Final spiral — the dramatic full version, 30 s before USB goes silent.
+const FINAL_SPIRAL_RADIUS_START: f32 = 80.0;
+const FINAL_SPIRAL_TURNS: f32 = 5.0;
+const FINAL_SPIRAL_FRAMES: u32 = 625; // 5.0 s @ 8 ms/frame
 
 // 5-min warning — medium escalation.
 const WARN5_RADIUS_START: f32 = 50.0;
@@ -137,7 +152,8 @@ const BOOT_SWEEP_STEP: EDuration = EDuration::from_millis(60);
 const SHUTDOWN_FLASH_STEP: EDuration = EDuration::from_millis(400);
 
 pub struct Ctx {
-    pub writer: Writer,
+    pub mouse: MouseHid,
+    pub kbd: KbdHid,
     pub neo: Neo,
     pub neo_pwr: Output<'static>,
     pub active_start: Option<Instant>,
@@ -145,39 +161,52 @@ pub struct Ctx {
 
 #[derive(Debug, Clone)]
 pub enum Ev {
-    SweepDone,
+    BootDone,
     WakeDone,
-    RunDone,
+    SpinDone,
     Jiggled,
     WarnDone,
-    ShutdownAnimDone,
+    SpiralDone,
 }
 
 statechart! {
 Jiggly {
     context: Ctx;
     events: Ev;
-    default(BootSweep);
+    default(Booting);
 
-    state BootSweep {
-        during: led_rgb_sweep(neo, neo_pwr);
-        on(SweepDone) => WakingDisplay;
+    state Booting {
+        during: boot_sweep(neo, neo_pwr);
+        on(BootDone) => WakingHost;
     }
 
-    state WakingDisplay {
-        during: animate_wake(writer);
+    // Wake the host using whichever input the host actually responds to.
+    // Keyboard first (more reliable on macOS), then a mouse shake as
+    // belt-and-suspenders. The parent state catches WakeDone (emitted by the
+    // mouse path) and exits to Settling.
+    state WakingHost {
+        default(WakingWithKeyboard);
         on(WakeDone) => Settling;
+
+        state WakingWithKeyboard {
+            during: wake_with_keyboard(kbd);
+            on(after KBD_WAKE_DURATION) => WakingWithMouse;
+        }
+
+        state WakingWithMouse {
+            during: wake_with_mouse(mouse);
+        }
     }
 
     // Quiet pause so the display has time to come out of sleep before the
-    // cursor starts drawing the "running" circles.
+    // cursor starts drawing the spinner.
     state Settling {
-        on(after SETTLING_DELAY) => ShowingRunning;
+        on(after SETTLING_DELAY) => Spinning;
     }
 
-    state ShowingRunning {
-        during: animate_running(writer);
-        on(RunDone) => Active;
+    state Spinning {
+        during: animate_spinner(mouse);
+        on(SpinDone) => Active;
     }
 
     state Active {
@@ -199,23 +228,23 @@ Jiggly {
         }
 
         state Warning10 {
-            during: animate_warning_10(writer);
+            during: animate_warning_10(mouse);
             on(WarnDone) => Breathing;
         }
 
         state Warning5 {
-            during: animate_warning_5(writer);
+            during: animate_warning_5(mouse);
             on(WarnDone) => Breathing;
         }
     }
 
     state Ending {
         during: blink_fast_red(neo);
-        default(ShutdownAnim);
+        default(Spiraling);
 
-        state ShutdownAnim {
-            during: animate_shutdown(writer);
-            on(ShutdownAnimDone) => Quiet;
+        state Spiraling {
+            during: animate_final_spiral(mouse);
+            on(SpiralDone) => Quiet;
         }
 
         state Quiet {
@@ -241,9 +270,9 @@ impl JigglyActions for JigglyActionContext<'_> {
         } else {
             (0, 1)
         };
-        send(&mut self.writer, dx, dy).await;
+        send_mouse(&mut self.mouse, dx, dy).await;
         Timer::after(PIXEL_DWELL).await;
-        send(&mut self.writer, -dx, -dy).await;
+        send_mouse(&mut self.mouse, -dx, -dy).await;
         let _ = self.emit(Ev::Jiggled);
     }
 
@@ -267,7 +296,7 @@ impl JigglyActions for JigglyActionContext<'_> {
 
 // ── During activities (free async fns) ─────────────────────────────
 
-async fn led_rgb_sweep(neo: &mut Neo, neo_pwr: &mut Output<'static>) -> Ev {
+async fn boot_sweep(neo: &mut Neo, neo_pwr: &mut Output<'static>) -> Ev {
     neo_pwr.set_high();
     Timer::after_millis(2).await;
 
@@ -278,10 +307,28 @@ async fn led_rgb_sweep(neo: &mut Neo, neo_pwr: &mut Output<'static>) -> Ev {
     paint(neo, 0, 0, BREATHE_PEAK).await;
     Timer::after(BOOT_SWEEP_STEP).await;
     paint(neo, 0, 0, 0).await;
-    Ev::SweepDone
+    Ev::BootDone
 }
 
-async fn animate_wake(writer: &mut Writer) -> Ev {
+// Tap Left Shift 4 times — macOS reliably wakes from a keyboard event but is
+// inconsistent about waking from raw mouse motion. The during loop ends after
+// the taps and idles in a long sleep; the parent state's KBD_WAKE_DURATION
+// timeout drives the transition out, not a completion event from this fn.
+async fn wake_with_keyboard(kbd: &mut KbdHid) -> Ev {
+    for _ in 0..KBD_WAKE_TAPS {
+        send_kbd(kbd, KBD_MOD_LEFT_SHIFT, [0; 6]).await;
+        Timer::after(KBD_TAP_HOLD).await;
+        send_kbd(kbd, 0, [0; 6]).await;
+        Timer::after(KBD_TAP_GAP).await;
+    }
+    // Idle until the parent timeout fires. The hsmc runtime cancels this
+    // future on transition, so the long sleep just parks us.
+    loop {
+        Timer::after(EDuration::from_secs(60)).await;
+    }
+}
+
+async fn wake_with_mouse(mouse: &mut MouseHid) -> Ev {
     let period_frames = (WAKE_FRAMES_PER_HALF * 2) as f32;
     let total_frames = WAKE_OSCILLATIONS * WAKE_FRAMES_PER_HALF * 2;
     let mut prev_x: f32 = 0.0;
@@ -296,7 +343,7 @@ async fn animate_wake(writer: &mut Writer) -> Ev {
         let (dx, dy, used_x, used_y) = step_delta(prev_x, prev_y, next_x, next_y, acc_x, acc_y);
         acc_x = used_x;
         acc_y = used_y;
-        send(writer, dx, dy).await;
+        send_mouse(mouse, dx, dy).await;
         prev_x = next_x;
         prev_y = next_y;
         Timer::after(ANIM_FRAME).await;
@@ -304,7 +351,7 @@ async fn animate_wake(writer: &mut Writer) -> Ev {
     Ev::WakeDone
 }
 
-async fn animate_running(writer: &mut Writer) -> Ev {
+async fn animate_spinner(mouse: &mut MouseHid) -> Ev {
     let total_frames = RUN_CIRCLES * RUN_FRAMES_PER_CIRCLE;
     let period_frames = RUN_FRAMES_PER_CIRCLE as f32;
     let mut prev_x: f32 = 0.0;
@@ -318,16 +365,16 @@ async fn animate_running(writer: &mut Writer) -> Ev {
         let (dx, dy, used_x, used_y) = step_delta(prev_x, prev_y, next_x, next_y, acc_x, acc_y);
         acc_x = used_x;
         acc_y = used_y;
-        send(writer, dx, dy).await;
+        send_mouse(mouse, dx, dy).await;
         prev_x = next_x;
         prev_y = next_y;
         Timer::after(ANIM_FRAME).await;
     }
-    Ev::RunDone
+    Ev::SpinDone
 }
 
 async fn animate_spiral(
-    writer: &mut Writer,
+    mouse: &mut MouseHid,
     radius_start: f32,
     radius_end: f32,
     turns: f32,
@@ -348,28 +395,28 @@ async fn animate_spiral(
         let (dx, dy, used_x, used_y) = step_delta(prev_x, prev_y, next_x, next_y, acc_x, acc_y);
         acc_x = used_x;
         acc_y = used_y;
-        send(writer, dx, dy).await;
+        send_mouse(mouse, dx, dy).await;
         prev_x = next_x;
         prev_y = next_y;
         Timer::after(ANIM_FRAME).await;
     }
 }
 
-async fn animate_shutdown(writer: &mut Writer) -> Ev {
+async fn animate_final_spiral(mouse: &mut MouseHid) -> Ev {
     animate_spiral(
-        writer,
-        SHUTDOWN_RADIUS_START,
+        mouse,
+        FINAL_SPIRAL_RADIUS_START,
         SPIRAL_RADIUS_END,
-        SHUTDOWN_TURNS,
-        SHUTDOWN_FRAMES,
+        FINAL_SPIRAL_TURNS,
+        FINAL_SPIRAL_FRAMES,
     )
     .await;
-    Ev::ShutdownAnimDone
+    Ev::SpiralDone
 }
 
-async fn animate_warning_5(writer: &mut Writer) -> Ev {
+async fn animate_warning_5(mouse: &mut MouseHid) -> Ev {
     animate_spiral(
-        writer,
+        mouse,
         WARN5_RADIUS_START,
         SPIRAL_RADIUS_END,
         WARN5_TURNS,
@@ -379,9 +426,9 @@ async fn animate_warning_5(writer: &mut Writer) -> Ev {
     Ev::WarnDone
 }
 
-async fn animate_warning_10(writer: &mut Writer) -> Ev {
+async fn animate_warning_10(mouse: &mut MouseHid) -> Ev {
     animate_spiral(
-        writer,
+        mouse,
         WARN10_RADIUS_START,
         SPIRAL_RADIUS_END,
         WARN10_TURNS,
@@ -481,7 +528,7 @@ fn step_delta(
 
 // ── HID + LED primitives ───────────────────────────────────────────
 
-async fn send(writer: &mut Writer, x: i8, y: i8) {
+async fn send_mouse(mouse: &mut MouseHid, x: i8, y: i8) {
     let report = MouseReport {
         buttons: 0,
         x,
@@ -489,7 +536,17 @@ async fn send(writer: &mut Writer, x: i8, y: i8) {
         wheel: 0,
         pan: 0,
     };
-    let _ = with_timeout(EDuration::from_secs(3), writer.write_serialize(&report)).await;
+    let _ = with_timeout(EDuration::from_secs(3), mouse.write_serialize(&report)).await;
+}
+
+async fn send_kbd(kbd: &mut KbdHid, modifier: u8, keycodes: [u8; 6]) {
+    let report = KeyboardReport {
+        modifier,
+        reserved: 0,
+        leds: 0,
+        keycodes,
+    };
+    let _ = with_timeout(EDuration::from_secs(3), kbd.write_serialize(&report)).await;
 }
 
 async fn paint(neo: &mut Neo, r: u8, g: u8, b: u8) {
@@ -537,9 +594,12 @@ async fn main(spawner: Spawner) {
 
     let driver = Driver::new(p.USB, Irqs);
 
-    let mut config = UsbConfig::new(0x046d, 0xc07d);
+    // Spoof a Logitech Unifying Receiver — a real-world composite device that
+    // exposes both mouse and keyboard HID interfaces under one VID/PID, which
+    // matches what this firmware now does.
+    let mut config = UsbConfig::new(0x046d, 0xc52b);
     config.manufacturer = Some("Logitech");
-    config.product = Some("G502 Mouse");
+    config.product = Some("USB Receiver");
     config.max_power = 100;
     config.max_packet_size_0 = 64;
 
@@ -547,7 +607,8 @@ async fn main(spawner: Spawner) {
     static BOS_DESCRIPTOR: StaticCell<[u8; 256]> = StaticCell::new();
     static MSOS_DESCRIPTOR: StaticCell<[u8; 256]> = StaticCell::new();
     static CONTROL_BUF: StaticCell<[u8; 64]> = StaticCell::new();
-    static HID_STATE: StaticCell<State> = StaticCell::new();
+    static MOUSE_HID_STATE: StaticCell<State> = StaticCell::new();
+    static KBD_HID_STATE: StaticCell<State> = StaticCell::new();
 
     let mut builder = Builder::new(
         driver,
@@ -558,7 +619,7 @@ async fn main(spawner: Spawner) {
         CONTROL_BUF.init([0; 64]),
     );
 
-    let hid_config = HidConfig {
+    let mouse_config = HidConfig {
         report_descriptor: MouseReport::desc(),
         request_handler: None,
         // 8 ms (125 Hz) — standard for full-speed mice. At the previous 60 ms
@@ -568,7 +629,22 @@ async fn main(spawner: Spawner) {
         hid_subclass: HidSubclass::Boot,
         hid_boot_protocol: HidBootProtocol::Mouse,
     };
-    let writer = HidWriter::<_, 5>::new(&mut builder, HID_STATE.init(State::new()), hid_config);
+    let mouse = HidWriter::<_, 5>::new(
+        &mut builder,
+        MOUSE_HID_STATE.init(State::new()),
+        mouse_config,
+    );
+
+    let kbd_config = HidConfig {
+        report_descriptor: KeyboardReport::desc(),
+        request_handler: None,
+        // The keyboard only fires once at boot; no need for fast polling.
+        poll_ms: 10,
+        max_packet_size: 8,
+        hid_subclass: HidSubclass::Boot,
+        hid_boot_protocol: HidBootProtocol::Keyboard,
+    };
+    let kbd = HidWriter::<_, 8>::new(&mut builder, KBD_HID_STATE.init(State::new()), kbd_config);
 
     let usb = builder.build();
     spawner.spawn(usb_task(usb).unwrap());
@@ -577,7 +653,8 @@ async fn main(spawner: Spawner) {
     static EVENT_CHAN: Channel<CriticalSectionRawMutex, Ev, 8> = Channel::new();
 
     let ctx = Ctx {
-        writer,
+        mouse,
+        kbd,
         neo,
         neo_pwr,
         active_start: None,
