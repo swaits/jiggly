@@ -12,11 +12,31 @@ categories  = ["embedded", "no-std"]
 publish     = false  # firmware binary; not a crates.io library
 
 [features]
-default = ["embassy"]
+default = ["embassy", "panic-reset"]
 # `hsmc` emits `#[cfg(feature = "embassy")]` from inside `statechart!` and
 # the cfg is evaluated in this crate's context, so we mirror the flag here
 # and forward it to `hsmc/embassy`.
 embassy = ["hsmc/embassy"]
+# Default panic handler — silently resets the chip. Mutually exclusive with
+# `defmt` (which uses panic-probe). Build a defmt firmware with
+# `cargo build --no-default-features --features embassy,defmt`.
+panic-reset = ["dep:panic-reset"]
+# Same trick as `embassy` above: `hsmc` emits `#[cfg(feature = "trace-defmt")]`
+# from inside `__chart_observe!` (re-exported via `statechart!`), and that
+# cfg is evaluated in *this* crate's feature set, not hsmc's. So we mirror
+# the flag here and forward it to `hsmc/trace-defmt`. Without this mirror,
+# `--features defmt` would compile cleanly but emit zero state-transition
+# logs, because every defmt arm in __chart_observe! would be cfg'd out.
+trace-defmt = ["hsmc/trace-defmt"]
+# Debug build over RTT. Pulls in defmt + defmt-rtt, swaps the panic handler
+# for panic-probe (so panics get printed instead of silently resetting), and
+# turns on hsmc's chart/state/transition tracing.
+defmt = [
+    "dep:defmt",
+    "dep:defmt-rtt",
+    "dep:panic-probe",
+    "trace-defmt",
+]
 
 [dependencies]
 embassy-executor = { version = "0.10.0", features = ["platform-cortex-m", "executor-thread"] }
@@ -32,10 +52,15 @@ libm             = "0.2"
 
 cortex-m        = { version = "0.7.6", features = ["inline-asm"] }
 cortex-m-rt     = "0.7.5"
-panic-reset     = "0.1"
+panic-reset     = { version = "0.1", optional = true }
 static_cell     = "2.1"
 # Cortex-M0+ has no hardware CAS; static_cell + heapless need this shim.
 portable-atomic = { version = "1.13", features = ["critical-section"] }
+
+# Defmt stack — only linked when the `defmt` feature is enabled.
+defmt       = { version = "0.3", optional = true }
+defmt-rtt   = { version = "0.4", optional = true }
+panic-probe = { version = "0.3", features = ["print-defmt"], optional = true }
 
 [lints.rust]
 unexpected_cfgs = { level = "allow", check-cfg = ['cfg(feature, values("tokio", "embassy"))'] }

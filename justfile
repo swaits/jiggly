@@ -7,6 +7,7 @@ firmware     := "jiggly"
 target       := "thumbv6m-none-eabi"
 base_addr    := "0x10000000"
 family_id    := "0xE48BFF56"
+chip         := "RP2040"
 
 out_release  := "target" / target / "release" / firmware
 out_bin      := "target" / target / "release" / firmware + ".bin"
@@ -98,6 +99,31 @@ flash: uf2
     done
     echo "Timed out waiting for XIAO UF2 volume. Copy {{ out_uf2 }} manually." >&2
     exit 1
+
+# Build the firmware with defmt-over-RTT enabled. Mutually exclusive with
+# the default `panic-reset` feature, so we drop default features.
+# DEFMT_LOG=trace overrides the `off` default in mise.toml so the macros
+# actually emit. Built in release mode because thumbv6m debug builds plus
+# defmt-rtt + panic-probe overflow flash quickly.
+build-debug:
+    DEFMT_LOG=trace cargo build --release --no-default-features --features embassy,defmt
+
+# Flash the defmt firmware via the attached SWD probe and tail RTT logs.
+# Plug the probe into the four SWD pads on the back of the Xiao
+# (SWCLK + SWDIO + GND — leave 3V3 disconnected so USB-C powers the board).
+# The Xiao's own USB-C can stay plugged into a separate host the whole time;
+# the SWD path and the USB path are independent.
+debug: build-debug
+    probe-rs run --chip {{ chip }} {{ out_release }}
+
+# Just tail RTT from a board that's already running the defmt firmware
+# (no flash). Useful for rejoining a session after Ctrl-C without a reset.
+attach:
+    probe-rs attach --chip {{ chip }} {{ out_release }}
+
+# List attached debug probes — sanity check that the DAPLink shows up.
+probes:
+    probe-rs list
 
 # Install the toolchain and cargo helpers declared in mise.toml.
 bootstrap:

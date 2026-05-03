@@ -24,10 +24,13 @@ use embassy_usb::{
 };
 use hsmc::{Duration, statechart};
 use libm::{cosf, powf, roundf, sinf};
+#[cfg(not(feature = "defmt"))]
 use panic_reset as _;
 use smart_leds::RGB8;
 use static_cell::StaticCell;
 use usbd_hid::descriptor::{KeyboardReport, MouseReport, SerializedDescriptor};
+#[cfg(feature = "defmt")]
+use {defmt_rtt as _, panic_probe as _};
 
 bind_interrupts!(struct Irqs {
     USBCTRL_IRQ => UsbInterruptHandler<USB>;
@@ -291,11 +294,23 @@ impl JigglyActions for JigglyActionContext<'_> {
     }
 
     async fn keyboard_wake(&mut self) {
-        let _ = embassy_futures::select::select(
+        let result = embassy_futures::select::select(
             wake_with_keyboard(&mut self.kbd),
             Timer::after(KBD_WAKE_DEADLINE),
         )
         .await;
+        #[cfg(feature = "defmt")]
+        match result {
+            embassy_futures::select::Either::First(_) => defmt::info!("kbd wake: completed"),
+            embassy_futures::select::Either::Second(_) => {
+                defmt::warn!(
+                    "kbd wake: deadline hit ({} ms)",
+                    KBD_WAKE_DEADLINE.as_millis()
+                )
+            }
+        }
+        #[cfg(not(feature = "defmt"))]
+        let _ = result;
         // Belt-and-suspenders: always send an all-keys-released report,
         // even if the deadline preempted the loop *between* a key-down
         // and its key-up. Without this, a stuck modifier (Shift!) or key
@@ -310,11 +325,21 @@ impl JigglyActions for JigglyActionContext<'_> {
     }
 
     async fn mouse_wake(&mut self) {
-        let _ = embassy_futures::select::select(
+        let result = embassy_futures::select::select(
             wake_with_mouse(&mut self.mouse),
             Timer::after(MOUSE_WAKE_DEADLINE),
         )
         .await;
+        #[cfg(feature = "defmt")]
+        match result {
+            embassy_futures::select::Either::First(_) => defmt::info!("mouse wake: completed"),
+            embassy_futures::select::Either::Second(_) => defmt::warn!(
+                "mouse wake: deadline hit ({} ms)",
+                MOUSE_WAKE_DEADLINE.as_millis()
+            ),
+        }
+        #[cfg(not(feature = "defmt"))]
+        let _ = result;
     }
 
     async fn jiggle_pair(&mut self) {
@@ -323,6 +348,8 @@ impl JigglyActions for JigglyActionContext<'_> {
         } else {
             (0, 1)
         };
+        #[cfg(feature = "defmt")]
+        defmt::info!("jiggle: dx={} dy={}", dx, dy);
         send_mouse(&mut self.mouse, dx, dy).await;
         Timer::after(PIXEL_DWELL).await;
         send_mouse(&mut self.mouse, -dx, -dy).await;
@@ -649,7 +676,14 @@ async fn watchdog_task(mut wd: Watchdog) -> ! {
 async fn main(spawner: Spawner) {
     let p = embassy_rp::init(Default::default());
 
+    #[cfg(feature = "defmt")]
+    defmt::info!("jiggly v{} boot", env!("CARGO_PKG_VERSION"));
+
     let mut watchdog = Watchdog::new(p.WATCHDOG);
+    // Pause the countdown while a debugger has the core halted, so
+    // breakpoints and single-stepping under `probe-rs` don't trip the
+    // 8 s reset. Cheap and always-correct, so leave it on for release too.
+    watchdog.pause_on_debug(true);
     watchdog.start(WATCHDOG_TIMEOUT);
 
     // NeoPixel: GPIO11 powers it, GPIO12 is the WS2812 data line driven from
@@ -679,7 +713,10 @@ async fn main(spawner: Spawner) {
     let mut config = UsbConfig::new(0x1209, 0xb0b0);
     config.manufacturer = Some("swaits.com");
     config.product = Some("jiggly");
-    config.serial_number = Some(make_serial(p.FLASH));
+    let serial = make_serial(p.FLASH);
+    #[cfg(feature = "defmt")]
+    defmt::info!("usb serial: {}", serial);
+    config.serial_number = Some(serial);
     config.device_release = 0x0200; // matches firmware version 0.2.0
     config.max_power = 100;
     config.max_packet_size_0 = 64;
@@ -730,6 +767,9 @@ async fn main(spawner: Spawner) {
     let usb = builder.build();
     spawner.spawn(usb_task(usb).unwrap());
     spawner.spawn(watchdog_task(watchdog).unwrap());
+
+    #[cfg(feature = "defmt")]
+    defmt::info!("usb + watchdog tasks spawned, starting statechart");
 
     static EVENT_CHAN: Channel<CriticalSectionRawMutex, Ev, 8> = Channel::new();
 
