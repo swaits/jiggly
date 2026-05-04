@@ -73,6 +73,13 @@ const YELLOW_PERIOD: EDuration = EDuration::from_secs(3);
 const RED_PERIOD: EDuration = EDuration::from_secs(2);
 const FAST_RED_PERIOD: EDuration = EDuration::from_millis(500);
 
+// Wake-up LED feedback periods. Blue on WakingHost (kbd+mouse), white on
+// Settling, then a linear white→green fade across the Spinning duration so
+// the LED hands off cleanly to Active's green breathing.
+const WAKING_PULSE_PERIOD: EDuration = EDuration::from_millis(800);
+const SETTLING_PULSE_PERIOD: EDuration = EDuration::from_millis(1200);
+const SPINNER_FADE_DURATION: EDuration = EDuration::from_millis(600);
+
 // LED brightness (raw WS2812 PWM, 0..=255).
 const BREATHE_FLOOR: u8 = 1;
 const BREATHE_PEAK: u8 = 16;
@@ -214,6 +221,7 @@ Jiggly {
     // its own internal deadline; the chart timer is what advances the
     // chart. No durings, no events — purely entry + timer.
     state WakingHost {
+        during: pulse_blue(neo);
         default(WakingWithKeyboard);
 
         state WakingWithKeyboard {
@@ -230,11 +238,13 @@ Jiggly {
     // Quiet pause so the display has time to come out of sleep before the
     // cursor starts drawing the spinner.
     state Settling {
+        during: pulse_white(neo);
         on(after SETTLING_DELAY) => Spinning;
     }
 
     state Spinning {
         during: animate_spinner(mouse);
+        during: fade_to_green(neo);
         on(SpinDone) => Active;
     }
 
@@ -538,6 +548,37 @@ async fn blink_fast_red(neo: &mut Neo) -> Ev {
             BREATHE_FLOOR
         };
         paint(neo, level, 0, 0).await;
+        Timer::after(LED_TICK).await;
+    }
+}
+
+async fn pulse_blue(neo: &mut Neo) -> Ev {
+    let start = Instant::now();
+    loop {
+        let level = sin_breath(WAKING_PULSE_PERIOD, start.elapsed(), BREATHE_FLOOR, BREATHE_PEAK);
+        paint(neo, 0, 0, level).await;
+        Timer::after(LED_TICK).await;
+    }
+}
+
+async fn pulse_white(neo: &mut Neo) -> Ev {
+    let start = Instant::now();
+    loop {
+        let level = sin_breath(SETTLING_PULSE_PERIOD, start.elapsed(), BREATHE_FLOOR, BREATHE_PEAK);
+        paint(neo, level, level, level).await;
+        Timer::after(LED_TICK).await;
+    }
+}
+
+// Linear fade from white(peak) → green(peak) so the LED hands off into
+// Active's green breathing without a visible jump.
+async fn fade_to_green(neo: &mut Neo) -> Ev {
+    let start = Instant::now();
+    let total_ms = SPINNER_FADE_DURATION.as_millis() as f32;
+    loop {
+        let t = ((start.elapsed().as_millis() as f32) / total_ms).min(1.0);
+        let rb = (BREATHE_PEAK as f32 * (1.0 - t)) as u8;
+        paint(neo, rb, BREATHE_PEAK, rb).await;
         Timer::after(LED_TICK).await;
     }
 }
