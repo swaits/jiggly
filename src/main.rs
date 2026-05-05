@@ -87,7 +87,7 @@ async fn main(spawner: Spawner) {
     #[cfg(feature = "defmt")]
     defmt::info!("usb serial: {}", serial);
     config.serial_number = Some(serial);
-    config.device_release = 0x0200; // matches firmware version 0.2.0
+    config.device_release = 0x0300; // matches firmware version 0.3.0
     config.max_power = 100;
     config.max_packet_size_0 = 64;
 

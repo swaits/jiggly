@@ -14,8 +14,7 @@ use crate::config::{
 };
 use crate::kbd::{KbdHid, send_kbd, wake_with_keyboard};
 use crate::led::{
-    Neo, blink_fast_red, boot_sweep, breathe_color, fade_to_green, paint, pulse_blue,
-    pulse_white,
+    Neo, blink_fast_red, boot_sweep, breathe_color, fade_to_green, paint, pulse_blue, pulse_white,
 };
 use crate::mouse::{
     MouseHid, animate_final_spiral, animate_spinner, animate_warning_5, animate_warning_10,

@@ -1,0 +1,25 @@
+[package]
+name        = "jiggly-tuning"
+version     = "0.1.0"
+edition     = "2024"
+authors     = ["Stephen Waits <steve@waits.net>"]
+description = "Multi-objective tuner for jiggly's four lifecycle constants — internal tool, not published."
+license     = "MIT"
+publish     = false  # internal tuning tool; not for crates.io
+
+# Standalone workspace so this crate doesn't get pulled into any parent
+# workspace and so cargo doesn't walk up looking for one.
+[workspace]
+
+[features]
+default = ["parallel"]
+parallel = ["heuropt/parallel"]
+
+[dependencies]
+heuropt = { version = "0.8", default-features = false }
+rand    = "0.9"
+
+[profile.release]
+opt-level     = 3
+lto           = "thin"
+codegen-units = 1

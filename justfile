@@ -132,3 +132,10 @@ bootstrap:
 # Show firmware file size summary.
 stats: uf2
     @ls -lh {{ out_release }} {{ out_bin }} {{ out_uf2 }}
+
+# Run the multi-objective NSGA-III tuner against the published heuropt crate
+# and print the recommended (RUN_DURATION, YELLOW_AT, RED_AT, FAST_RED_AT)
+# pick. See README "Why these timings…" for the methodology and
+# `tuning/src/main.rs` to edit the day model or weights.
+tune:
+    cd tuning && cargo run --release

@@ -14,7 +14,7 @@ Plugs into USB, presents as a composite mouse + keyboard HID device
   wake any sleeping host. Mouse motion alone doesn't reliably wake
   macOS; a key tap does. F13 is chosen because it's harmless if it ever
   ends up stuck — no OS maps it by default.
-- For the next four hours, nudges the cursor one pixel every 4½ minutes
+- For the next 3 h 51 m, nudges the cursor one pixel every 4½ minutes
   so the host never falls asleep.
 - Breathes the on-board NeoPixel green → yellow → red as time runs
   down. Two on-screen "spiral" warnings fire 10 min and 5 min before
@@ -72,7 +72,7 @@ Active                                   green→yellow→red breathing
 
 A separate embassy task feeds the hardware watchdog every 5 s.
 
-## Why four hours, and why those LED thresholds?
+## Why these timings, and why those LED thresholds?
 
 The point isn't to keep the screen awake forever. It's to keep it
 awake while you're at your desk and let it sleep when you're not. The
@@ -90,9 +90,15 @@ That's a four-knob problem:
 | `RED_AT`      | minutes-remaining where breathing-red begins             |
 | `FAST_RED_AT` | minutes-remaining where the fast-pulse-red blink begins  |
 
-`scripts/tune_runtime.py` is a Monte Carlo that does a 4-D grid
-search over those four constants across 50 000 simulated workdays.
-The model:
+The `tuning/` crate solves it as a four-objective Pareto search
+using [`heuropt`][heuropt] and NSGA-III:
+
+1. **minimize work-time failures** (screen sleeps while the user is at their desk)
+2. **maximize lunch sleep**
+3. **minimize button presses**
+4. **minimize after-hours waste** (screen still awake past clock-out)
+
+The user model:
 
 - Workday start is `Triangular(8:00, mode 8:30, 9:30)`, end is
   `Triangular(16:00, mode 17:30, 19:00)`. Lunch is fixed at 12:00–13:00.
@@ -102,34 +108,36 @@ The model:
   fires.
 - Free `RESET` at boot and at 13:00 (re-login after lunch).
 
-The composite score rewards lunch-hour expiration (especially
-12:15–12:45) and penalizes the screen sleeping while the user is at
-their desk.
-
-The winner — and what the firmware ships:
+NSGA-III returns a Pareto front of ≈28 non-dominated points across
+those four objectives — every one of them a legitimate tradeoff. To
+pick a single recommendation the tuner applies explicit decision
+weights (lunch_sleep 30 %, after_hours 25 %, work_fail 20 %, presses
+15 %, balance 10 %) plus a press-count comfort cap. The pick — and
+what the firmware ships:
 
 ```
-RUN_DURATION = 4h00m   YELLOW_AT = 30   RED_AT = 25   FAST_RED_AT = 20
+RUN_DURATION = 3h51m   YELLOW_AT = 22   RED_AT = 11   FAST_RED_AT = 4
 ```
 
-(LED thresholds are minutes-remaining.) The screen sleeps somewhere
-during lunch on **~74 %** of simulated days and in the 12:15–12:45
-sweet spot on **~52 %**.
+(LED thresholds are minutes-remaining.) Across 1 000 simulated
+workdays this combination averages **26 minutes** of lunch sleep
+and lands in the 12:15–12:45 sweet spot on **~57 %** of days, with
+**zero** mean work-time failure and ~2 minutes/day of after-hours
+waste at a cost of ~2.9 button presses/day.
 
-The interesting result is that the obvious-looking `60 / 30 / 10`
-thresholds (long, gentle warning, urgent finish) ranked dead-average
-out of 2 245 combos. Long visible warnings turn out to be
-counter-productive: a 30-minute yellow phase gives you 30 minutes to
-glance up, notice the LED, and tap `RESET` — and a tap during yellow
-extends the cycle into the afternoon, the opposite of the goal.
-Shrinking yellow and red to "long enough to notice, short enough not
-to act on" pushes more days into a clean lunch death.
+The interesting result is that **shorter warning phases are better**.
+A long yellow phase gives you 30 minutes to glance up, notice the
+LED, and tap `RESET` out of an abundance of caution — and a tap
+during yellow extends the cycle into the afternoon, the opposite of
+the goal. The Pareto-front winner runs an 11-minute yellow, a 7-
+minute red, and a 4-minute fast-red: long enough to register the
+warning, short enough that the natural reaction is to wait it out.
 
 If your day looks different — different start/end distribution,
-different press habits, different lunch length — edit the constants
-and ranges at the top of `scripts/tune_runtime.py`, run it
-(`uv run scripts/tune_runtime.py`), and update the four values in
-`src/main.rs`.
+different press habits, different lunch length — edit the model
+constants in `tuning/src/main.rs`, run `just tune` (or `cargo run
+--release` from inside `tuning/`), and update the four values in
+`src/config.rs`.
 
 ## USB identity
 
@@ -148,6 +156,7 @@ MIT — see [LICENSE](LICENSE).
 [xiao]:     https://wiki.seeedstudio.com/XIAO-RP2040/
 [embassy]:  https://embassy.dev/
 [hsmc]:     https://crates.io/crates/hsmc
+[heuropt]:  https://crates.io/crates/heuropt
 [mise]:     https://mise.jdx.dev/
 [just]:     https://just.systems/
 [pidcodes]: https://pid.codes/

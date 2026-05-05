@@ -1,0 +1,6 @@
+# Override the firmware crate's thumbv6m-none-eabi default. This crate is a
+# host-side simulation tool; it needs std and the host toolchain. Closer
+# .cargo/config.toml files win key-by-key, so this `target` overrides the
+# parent's `target = "thumbv6m-none-eabi"`.
+[build]
+target = "x86_64-unknown-linux-gnu"

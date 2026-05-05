@@ -15,8 +15,8 @@ use smart_leds::RGB8;
 
 use crate::chart::Ev;
 use crate::config::{
-    BOOT_SWEEP_STEP, BREATHE_FLOOR, BREATHE_PEAK, FAST_RED_AT, FAST_RED_PERIOD, LED_TICK,
-    RED_AT, RED_PERIOD, RUN_BEFORE_SHUTDOWN, SETTLING_PULSE_PERIOD, SLOW_GREEN_PERIOD,
+    BOOT_SWEEP_STEP, BREATHE_FLOOR, BREATHE_PEAK, FAST_RED_AT, FAST_RED_PERIOD, LED_TICK, RED_AT,
+    RED_PERIOD, RUN_BEFORE_SHUTDOWN, SETTLING_PULSE_PERIOD, SLOW_GREEN_PERIOD,
     SPINNER_FADE_DURATION, WAKING_PULSE_PERIOD, YELLOW_AT, YELLOW_PERIOD,
 };
 
@@ -68,7 +68,12 @@ pub(crate) async fn blink_fast_red(neo: &mut Neo) -> Ev {
 pub(crate) async fn pulse_blue(neo: &mut Neo) -> Ev {
     let start = Instant::now();
     loop {
-        let level = sin_breath(WAKING_PULSE_PERIOD, start.elapsed(), BREATHE_FLOOR, BREATHE_PEAK);
+        let level = sin_breath(
+            WAKING_PULSE_PERIOD,
+            start.elapsed(),
+            BREATHE_FLOOR,
+            BREATHE_PEAK,
+        );
         paint(neo, 0, 0, level).await;
         Timer::after(LED_TICK).await;
     }
@@ -77,7 +82,12 @@ pub(crate) async fn pulse_blue(neo: &mut Neo) -> Ev {
 pub(crate) async fn pulse_white(neo: &mut Neo) -> Ev {
     let start = Instant::now();
     loop {
-        let level = sin_breath(SETTLING_PULSE_PERIOD, start.elapsed(), BREATHE_FLOOR, BREATHE_PEAK);
+        let level = sin_breath(
+            SETTLING_PULSE_PERIOD,
+            start.elapsed(),
+            BREATHE_FLOOR,
+            BREATHE_PEAK,
+        );
         paint(neo, level, level, level).await;
         Timer::after(LED_TICK).await;
     }

@@ -7,6 +7,51 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.0] - 2026-05-07
+
+### Added
+
+- **`tuning/` crate** — a host-side multi-objective NSGA-III tuner for
+  jiggly's four lifecycle constants. Runs against published [`heuropt`][heuropt]
+  0.8 (with the `parallel` rayon feature) and prints the Pareto front,
+  extreme tradeoffs per objective, the firmware's current shipping
+  defaults, and a single weighted-rank recommendation. The crate is its
+  own workspace root with a local `.cargo/config.toml` overriding the
+  firmware's inherited `thumbv6m-none-eabi` build target so it can use
+  `std`. Invoked via `just tune` or `cargo run --release` from inside
+  `tuning/`.
+
+### Changed
+
+- **Lifecycle timings retuned** via the new tuner's 4-objective
+  (work-time failure, lunch sleep, presses, after-hours waste) Pareto
+  search, then collapsed by explicit decision weights. New shipping
+  values: **`RUN_DURATION` 4h00m → 3h51m**, **`YELLOW_AT` 30 → 22**,
+  **`RED_AT` 25 → 11**, **`FAST_RED_AT` 20 → 4** (LED thresholds in
+  minutes-remaining). The 0.2.0 single-composite-score grid had baked
+  the user's weight choices into the search itself; the new approach
+  surfaces the legitimate tradeoffs first and applies preferences
+  afterward. Across 1,000 simulated workdays the new combination
+  averages 26 minutes of lunch sleep, lands in the 12:15–12:45 sweet
+  spot on ~57 % of days, with zero mean work-time failure and ~2 min/day
+  of after-hours waste. The 0.2.0 shipping defaults survive on the new
+  Pareto front but rank well below the new pick under the same weights.
+- **`config.device_release` 0x0200 → 0x0300** — matches firmware
+  version 0.3.0.
+- **README section heading "Why four hours…" → "Why these timings…"**,
+  rewritten to describe the new methodology, the four objectives, the
+  explicit decision weights, and the actual run statistics.
+
+### Removed
+
+- **`scripts/tune_runtime.py`** — the Python single-composite-score
+  grid search is superseded by the in-repo `tuning/` crate's NSGA-III
+  multi-objective search. The new tuner ships with the firmware, builds
+  reproducibly through `cargo`/`mise`, and is just a normal Rust
+  dependency on `heuropt` (no separate `uv` invocation).
+
+[heuropt]: https://crates.io/crates/heuropt
+
 ## [0.2.0] - 2026-05-01
 
 ### Added
@@ -145,6 +190,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `bootstrap`. All recipes execute inside `mise exec -- sh -eu -c` so the
   pinned toolchain is used regardless of shell activation state.
 
-[Unreleased]: https://github.com/swaits/jiggly/compare/v0.2.0...HEAD
+[Unreleased]: https://github.com/swaits/jiggly/compare/v0.3.0...HEAD
+[0.3.0]: https://github.com/swaits/jiggly/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/swaits/jiggly/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/swaits/jiggly/releases/tag/v0.1.0

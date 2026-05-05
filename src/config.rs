@@ -1,20 +1,19 @@
 //! Compile-time tuning constants — timing, geometry, brightness.
 //!
 //! Every magic number lives here so the rest of the firmware reads as
-//! pure behaviour. Several values are joint-tuned by `scripts/tune_runtime.py`
-//! — see the README's "Why four hours…" section for the rationale.
+//! pure behaviour. Several values are joint-tuned by the `tuning/` crate
+//! — see the README's "Why these timings…" section for the rationale.
 
 use embassy_time::Duration as EDuration;
 use hsmc::Duration;
 
 // ── Lifecycle timing (statechart Durations) ────────────────────────
-// 4h00m: optimum from the 4-D Monte Carlo (RUN_DURATION × YELLOW_AT ×
-// RED_AT × FAST_RED_AT) over a typical office workday distribution
-// with a per-minute press-on-warning user model. Lands the screen-sleep
-// in the 12:15–12:45 sweet spot on ~52 % of days and somewhere in
-// lunch on ~74 %. See the README's "Why four hours…" section and
-// `scripts/tune_runtime.py` for the simulation.
-pub(crate) const RUN_DURATION: Duration = Duration::from_hours(4);
+// 3h51m: a-posteriori pick from a 4-objective NSGA-III Pareto search
+// over (RUN_DURATION, YELLOW_AT, RED_AT, FAST_RED_AT) — minimize work-
+// time failures, maximize lunch sleep, minimize button presses, minimize
+// after-hours waste. See the README's "Why these timings?" section and
+// `tuning/` for the search.
+pub(crate) const RUN_DURATION: Duration = Duration::from_mins(3 * 60 + 51);
 pub(crate) const SHUTDOWN_LEAD: Duration = Duration::from_secs(30);
 pub(crate) const RUN_BEFORE_SHUTDOWN: Duration = RUN_DURATION.saturating_sub(SHUTDOWN_LEAD);
 pub(crate) const SHUTDOWN_ANIM_BUDGET: Duration = Duration::from_secs(5);
@@ -23,12 +22,11 @@ pub(crate) const JIGGLE_PERIOD: Duration = Duration::from_secs(270);
 pub(crate) const FLASH_DURATION: Duration = Duration::from_millis(100);
 
 // Phase boundaries — compared against time *remaining* in Active.
-// Joint optimum from `scripts/tune_runtime.py`. Yellow and red are
-// kept deliberately short (5 min each); the long phase is fast-red.
-// See the README's "Why four hours…" section for the rationale.
-pub(crate) const YELLOW_AT: EDuration = EDuration::from_secs(30 * 60);
-pub(crate) const RED_AT: EDuration = EDuration::from_secs(25 * 60);
-pub(crate) const FAST_RED_AT: EDuration = EDuration::from_secs(20 * 60);
+// Joint pick from the NSGA-III Pareto search; see the README's
+// "Why these timings…" section for the rationale.
+pub(crate) const YELLOW_AT: EDuration = EDuration::from_secs(22 * 60);
+pub(crate) const RED_AT: EDuration = EDuration::from_secs(11 * 60);
+pub(crate) const FAST_RED_AT: EDuration = EDuration::from_secs(4 * 60);
 
 // LED breathing math
 pub(crate) const LED_TICK: EDuration = EDuration::from_millis(20);
